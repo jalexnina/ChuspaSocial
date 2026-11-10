@@ -23,9 +23,9 @@
  * @license    http://gnu.org GNU GPL v3 or later
  */
 
-defined('MOODLE_INTERNAL') || die();
-
 namespace local_chuspasocial\local;
+
+defined('MOODLE_INTERNAL') || die();
 
 use advanced_testcase;
 
@@ -200,5 +200,465 @@ class listing_service_test extends advanced_testcase {
         $this->assertCount(1, $result);
         $this->assertEquals($id, $result[0]->id);
     }
-}
+    
+     /**
+     * Test case: Vincular cursos correctamente a un listado.
+     *
+     * @covers \local_chuspasocial\local\listing_service::set_courses
+     */
+    public function test_set_courses_vincular(): void {
+        global $DB;
+        $generator = $this->getDataGenerator();
 
+        $course1 = $generator->create_course();
+        $course2 = $generator->create_course();
+        $listingid = $this->crear_anuncio('Libro de Redes', 'Tanenbaum');
+
+        listing_service::set_courses($listingid, [ $course1->id, $course2->id ]);
+
+        $this->assertTrue($DB->record_exists('local_chuspasocial_lstcourse', [ 'listingid' => $listingid, 'courseid' => $course1->id ]));
+        $this->assertTrue($DB->record_exists('local_chuspasocial_lstcourse', [ 'listingid' => $listingid, 'courseid' => $course2->id ]));
+    }
+
+    /**
+     * Test case: Reemplazar cursos existentes por un nuevo conjunto de cursos.
+     *
+     * @covers \local_chuspasocial\local\listing_service::set_courses
+     */
+    public function test_set_courses_reemplazar(): void {
+        global $DB;
+        $generator = $this->getDataGenerator();
+
+        $course1 = $generator->create_course();
+        $course2 = $generator->create_course();
+        $listingid = $this->crear_anuncio('Libro de Base de Datos', 'Date');
+
+        listing_service::set_courses($listingid, [ $course1->id ]);
+        listing_service::set_courses($listingid, [ $course2->id ]);
+
+        $this->assertFalse($DB->record_exists('local_chuspasocial_lstcourse', [ 'listingid' => $listingid, 'courseid' => $course1->id ]));
+        $this->assertTrue($DB->record_exists('local_chuspasocial_lstcourse', [ 'listingid' => $listingid, 'courseid' => $course2->id ]));
+    }
+
+    /**
+     * Test case: Intentar vincular cursos a un listado inexistente (debe lanzar una excepción).
+     *
+     * @covers \local_chuspasocial\local\listing_service::set_courses
+     */
+    public function test_set_courses_inexistente(): void {
+        $generator = $this->getDataGenerator();
+        $course = $generator->create_course();
+        $invalidlistingid = 99999;
+
+        $this->expectException(\moodle_exception::class);
+        listing_service::set_courses($invalidlistingid, [ $course->id ]);
+    }
+
+    /**
+     * Solo devuelve anuncios vinculados a las materias del usuario.
+     *
+     * @covers \local_chuspasocial\local\listing_service::get_for_my_courses
+     */
+    public function test_get_for_my_courses_solo_mis_materias(): void {
+        global $DB;
+
+        $generator = $this->getDataGenerator();
+        $user = $generator->create_user();
+        $mycourse = $generator->create_course();
+        $othercourse = $generator->create_course();
+        $generator->enrol_user($user->id, $mycourse->id, 'student');
+
+        $mylistingid = $this->crear_anuncio('Calculo', 'Stewart');
+        $otherlistingid = $this->crear_anuncio('Fisica', 'Serway');
+        $DB->insert_record('local_chuspasocial_lstcourse', (object) [
+            'listingid' => $mylistingid,
+            'courseid' => $mycourse->id,
+        ]);
+        $DB->insert_record('local_chuspasocial_lstcourse', (object) [
+            'listingid' => $otherlistingid,
+            'courseid' => $othercourse->id,
+        ]);
+        $this->setUser($user);
+
+        $result = listing_service::get_for_my_courses(0, 10);
+
+        $this->assertCount(1, $result);
+        $this->assertEquals($mylistingid, $result[0]->id);
+    }
+
+    /**
+     * Excluye vendidos aunque pertenezcan a mis materias.
+     *
+     * @covers \local_chuspasocial\local\listing_service::get_for_my_courses
+     */
+    public function test_get_for_my_courses_excluye_vendidos(): void {
+        global $DB;
+
+        $generator = $this->getDataGenerator();
+        $user = $generator->create_user();
+        $course = $generator->create_course();
+        $generator->enrol_user($user->id, $course->id, 'student');
+
+        $availableid = $this->crear_anuncio('Libro disponible', 'Autor A');
+        $soldid = $this->crear_anuncio('Libro vendido', 'Autor B');
+        $DB->set_field('local_chuspasocial_listing', 'status', 'sold', ['id' => $soldid]);
+        foreach ([$availableid, $soldid] as $listingid) {
+            $DB->insert_record('local_chuspasocial_lstcourse', (object) [
+                'listingid' => $listingid,
+                'courseid' => $course->id,
+            ]);
+        }
+        $this->setUser($user);
+
+        $result = listing_service::get_for_my_courses(0, 10);
+
+        $this->assertCount(1, $result);
+        $this->assertEquals($availableid, $result[0]->id);
+    }
+
+    /**
+     * No repite un anuncio vinculado a dos de mis materias.
+     *
+     * @covers \local_chuspasocial\local\listing_service::get_for_my_courses
+     */
+    public function test_get_for_my_courses_sin_duplicados(): void {
+        global $DB;
+
+        $generator = $this->getDataGenerator();
+        $user = $generator->create_user();
+        $course1 = $generator->create_course();
+        $course2 = $generator->create_course();
+        $generator->enrol_user($user->id, $course1->id, 'student');
+        $generator->enrol_user($user->id, $course2->id, 'student');
+
+        $listingid = $this->crear_anuncio('Algebra', 'Baldor');
+        foreach ([$course1->id, $course2->id] as $courseid) {
+            $DB->insert_record('local_chuspasocial_lstcourse', (object) [
+                'listingid' => $listingid,
+                'courseid' => $courseid,
+            ]);
+        }
+        $this->setUser($user);
+
+        $result = listing_service::get_for_my_courses(0, 10);
+
+        $this->assertCount(1, $result);
+        $this->assertEquals($listingid, $result[0]->id);
+    }
+    /**
+     * El autor puede actualizar su anuncio.
+     *
+     * @covers \local_chuspasocial\local\listing_service::update_listing
+     */
+    public function test_update_listing_as_author(): void {
+        global $DB;
+
+        $listingid = $this->crear_anuncio('Titulo original', 'Autor de prueba');
+        $authorid = $DB->get_field(
+            'local_chuspasocial_listing',
+            'userid',
+            ['id' => $listingid],
+            MUST_EXIST
+        );
+        $this->setUser((int) $authorid);
+
+        $updated = listing_service::update_listing(
+            $listingid,
+            (object) ['title' => 'Titulo actualizado']
+        );
+
+        $this->assertSame('Titulo actualizado', $updated->get('title'));
+        $this->assertSame(
+            'Titulo actualizado',
+            $DB->get_field(
+                'local_chuspasocial_listing',
+                'title',
+                ['id' => $listingid],
+                MUST_EXIST
+            )
+        );
+    }
+
+    /**
+     * Otro usuario no puede actualizar un anuncio ajeno.
+     *
+     * @covers \local_chuspasocial\local\listing_service::update_listing
+     */
+    public function test_update_listing_as_other_user(): void {
+        global $DB;
+
+        $listingid = $this->crear_anuncio('Titulo original', 'Autor de prueba');
+        $otheruser = $this->getDataGenerator()->create_user();
+        $this->setUser($otheruser);
+
+        try {
+            listing_service::update_listing(
+                $listingid,
+                (object) ['title' => 'Cambio no permitido']
+            );
+            $this->fail('Se esperaba una excepcion de permisos.');
+        } catch (\moodle_exception $exception) {
+            $this->assertSame('nopermissions', $exception->errorcode);
+        }
+
+        $this->assertSame(
+            'Titulo original',
+            $DB->get_field(
+                'local_chuspasocial_listing',
+                'title',
+                ['id' => $listingid],
+                MUST_EXIST
+            )
+        );
+    }
+
+    /**
+     * Un precio con decimales se formatea con la moneda y dos decimales.
+     *
+     * @covers \local_chuspasocial\local\listing_service::format_price
+     */
+    public function test_format_price_con_decimales(): void {
+        set_config('currency', 'BOB', 'local_chuspasocial');
+
+        $this->assertSame('BOB ' . format_float(10.5, 2), listing_service::format_price(10.5));
+        $this->assertSame('BOB ' . format_float(99.999, 2), listing_service::format_price(99.999));
+    }
+
+    /**
+     * Un precio de cero devuelve la etiqueta localizada de gratis.
+     *
+     * @covers \local_chuspasocial\local\listing_service::format_price
+     */
+    public function test_format_price_con_cero(): void {
+        $gratis = get_string('free', 'local_chuspasocial');
+
+        $this->assertSame($gratis, listing_service::format_price(0.0));
+        $this->assertSame($gratis, listing_service::format_price(0));
+    }
+
+    /**
+     * El autor del anuncio puede gestionarlo.
+     *
+     * @covers \local_chuspasocial\local\listing_service::can_manage
+     */
+    public function test_can_manage_autor(): void {
+        $listing = new \local_chuspasocial\local\persistent\listing($this->crear_anuncio('Calculo', 'Stewart'));
+
+        $this->assertTrue(listing_service::can_manage($listing, (int) $listing->get('userid')));
+    }
+
+    /**
+     * Un moderador puede gestionar un anuncio ajeno.
+     *
+     * @covers \local_chuspasocial\local\listing_service::can_manage
+     */
+    public function test_can_manage_moderador(): void {
+        $generator = $this->getDataGenerator();
+        $moderator = $generator->create_user();
+        $context = \context_system::instance();
+        $roleid = $generator->create_role();
+        assign_capability('local/chuspasocial:moderate', CAP_ALLOW, $roleid, $context->id);
+        role_assign($roleid, $moderator->id, $context->id);
+
+        $listing = new \local_chuspasocial\local\persistent\listing($this->crear_anuncio('Calculo', 'Stewart'));
+
+        $this->assertTrue(listing_service::can_manage($listing, (int) $moderator->id));
+    }
+
+    /**
+     * Otro usuario sin permisos no puede gestionar el anuncio.
+     *
+     * @covers \local_chuspasocial\local\listing_service::can_manage
+     */
+    public function test_can_manage_otro_usuario(): void {
+        $other = $this->getDataGenerator()->create_user();
+        $listing = new \local_chuspasocial\local\persistent\listing($this->crear_anuncio('Calculo', 'Stewart'));
+
+        $this->assertFalse(listing_service::can_manage($listing, (int) $other->id));
+    }
+    
+    /**
+     * Comprueba que el propietario puede marcar su anuncio como vendido.
+     *
+     * @covers \local_chuspasocial\local\listing_service::mark_sold
+     */
+    public function test_mark_sold_as_author(): void {
+        global $DB;
+
+        $listingid = $this->crear_anuncio('Libro de prueba', 'Autor');
+
+        $authorid = $DB->get_field(
+            'local_chuspasocial_listing',
+            'userid',
+            ['id' => $listingid],
+            MUST_EXIST
+        );
+
+        $this->setUser((int) $authorid);
+
+        listing_service::mark_sold($listingid);
+
+        $this->assertSame(
+            'sold',
+            $DB->get_field(
+                'local_chuspasocial_listing',
+                'status',
+                ['id' => $listingid],
+                MUST_EXIST
+            )
+        );
+    }
+
+    /**
+     * Comprueba que otro usuario no puede marcar un anuncio como vendido.
+     *
+     * @covers \local_chuspasocial\local\listing_service::mark_sold
+     */
+    public function test_mark_sold_as_other_user(): void {
+        global $DB;
+
+        $listingid = $this->crear_anuncio('Libro de prueba', 'Autor');
+        $otheruser = $this->getDataGenerator()->create_user();
+
+        $this->setUser($otheruser);
+
+        try {
+            listing_service::mark_sold($listingid);
+            $this->fail('Se esperaba una excepcion de permisos.');
+        } catch (\moodle_exception $exception) {
+            $this->assertSame('nopermissions', $exception->errorcode);
+        }
+
+        $this->assertSame(
+            'available',
+            $DB->get_field(
+                'local_chuspasocial_listing',
+                'status',
+                ['id' => $listingid],
+                MUST_EXIST
+            )
+        );
+    }
+
+    /**
+     * Un usuario con permiso crea un anuncio válido: se guarda a su nombre,
+     * ignora los campos protegidos y dispara el evento listing_created.
+     *
+     * @covers \local_chuspasocial\local\listing_service::create_listing
+     */
+    public function test_create_listing_valido(): void {
+        global $DB;
+
+        set_config('enablemarketplace', 1, 'local_chuspasocial');
+        $user = $this->getDataGenerator()->create_user();
+        $this->setUser($user);
+
+        $sink = $this->redirectEvents();
+        $listing = listing_service::create_listing((object) [
+            'title' => 'Cálculo I',
+            'author' => 'Stewart',
+            'price' => 45.5,
+            'userid' => $user->id + 100,
+        ]);
+        $events = $sink->get_events();
+        $sink->close();
+
+        $this->assertGreaterThan(0, $listing->get('id'));
+        $this->assertEquals($user->id, $listing->get('userid'));
+
+        $record = $DB->get_record('local_chuspasocial_listing', ['id' => $listing->get('id')], '*', MUST_EXIST);
+        $this->assertSame('Cálculo I', $record->title);
+        $this->assertSame('Stewart', $record->author);
+        $this->assertEquals(45.5, (float) $record->price);
+        $this->assertEquals($user->id, $record->userid);
+        $this->assertSame('available', $record->status);
+
+        $this->assertCount(1, $events);
+        $this->assertInstanceOf(\local_chuspasocial\event\listing_created::class, $events[0]);
+        $this->assertEquals($listing->get('id'), $events[0]->objectid);
+    }
+
+    /**
+     * Un precio negativo se rechaza y no se crea ningún anuncio.
+     *
+     * @covers \local_chuspasocial\local\listing_service::create_listing
+     */
+    public function test_create_listing_precio_negativo(): void {
+        global $DB;
+
+        set_config('enablemarketplace', 1, 'local_chuspasocial');
+        $this->setUser($this->getDataGenerator()->create_user());
+
+        try {
+            listing_service::create_listing((object) [
+                'title' => 'Física',
+                'author' => 'Serway',
+                'price' => -10,
+            ]);
+            $this->fail('Se esperaba una excepcion por precio negativo.');
+        } catch (\invalid_parameter_exception $exception) {
+            $this->assertStringContainsString('price', $exception->debuginfo);
+        }
+
+        $this->assertSame(0, $DB->count_records('local_chuspasocial_listing'));
+    }
+
+    /**
+     * Con el marketplace deshabilitado no se puede crear un anuncio.
+     *
+     * @covers \local_chuspasocial\local\listing_service::create_listing
+     */
+    public function test_create_listing_marketplace_deshabilitado(): void {
+        global $DB;
+
+        set_config('enablemarketplace', 0, 'local_chuspasocial');
+        $this->setUser($this->getDataGenerator()->create_user());
+
+        try {
+            listing_service::create_listing((object) [
+                'title' => 'Química',
+                'author' => 'Chang',
+                'price' => 20,
+            ]);
+            $this->fail('Se esperaba una excepcion por marketplace deshabilitado.');
+        } catch (\moodle_exception $exception) {
+            $this->assertSame('nopermissions', $exception->errorcode);
+        }
+
+        $this->assertSame(0, $DB->count_records('local_chuspasocial_listing'));
+    }
+
+    /**
+     * Un usuario sin la capacidad createlisting no puede crear un anuncio.
+     *
+     * @covers \local_chuspasocial\local\listing_service::create_listing
+     */
+    public function test_create_listing_sin_capacidad(): void {
+        global $DB;
+
+        set_config('enablemarketplace', 1, 'local_chuspasocial');
+        $user = $this->getDataGenerator()->create_user();
+
+        $roleid = $DB->get_field('role', 'id', ['shortname' => 'user'], MUST_EXIST);
+        assign_capability(
+            'local/chuspasocial:createlisting',
+            CAP_PROHIBIT,
+            $roleid,
+            \context_system::instance(),
+            true
+        );
+        $this->setUser($user);
+
+        $this->expectException(\required_capability_exception::class);
+
+        try {
+            listing_service::create_listing((object) [
+                'title' => 'Biología',
+                'author' => 'Campbell',
+                'price' => 30,
+            ]);
+        } finally {
+            $this->assertSame(0, $DB->count_records('local_chuspasocial_listing'));
+        }
+    }
+}
